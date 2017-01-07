@@ -32,6 +32,7 @@
 -module(lhttpc_client).
 
 -export([request/10]).
+-export([get_request_result/10]).
 
 -include("lhttpc_types.hrl").
 
@@ -77,16 +78,7 @@
 %%    Option = {connect_timeout, Milliseconds}
 %% @end
 request(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
-    Result = try
-        execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options)
-    catch
-        Reason ->
-            {response, ReqId, self(), {error, Reason}};
-        error:closed ->
-            {response, ReqId, self(), {error, connection_closed}};
-        error:Error ->
-            {exit, ReqId, self(), {Error, erlang:get_stacktrace()}}
-    end,
+    Result = get_request_result(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options),
     case Result of
         {response, _, _, {ok, {no_return, _}}} -> ok;
         _Else                               -> From ! Result
@@ -95,6 +87,21 @@ request(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
     % calling us is trapping exits
     unlink(From),
     ok.
+
+get_request_result(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
+    try
+        execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options)
+    catch
+        %% all throw/1
+        Reason ->
+            {response, ReqId, self(), {error, Reason}};
+        %% 'error:closed' only
+        error:closed ->
+            {response, ReqId, self(), {error, connection_closed}};
+        %% all other error/1 runtime errors
+        error:Error ->
+            {exit, ReqId, self(), {Error, erlang:get_stacktrace()}}
+    end.
 
 execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
     UploadWindowSize = proplists:get_value(partial_upload, Options),

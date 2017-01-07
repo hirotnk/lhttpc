@@ -28,6 +28,31 @@
 -module(lhttpc_tests).
 
 -export([test_no/2]).
+
+-export( % Shared with `lhttpc_simple_request_tests'.
+  [
+      chunked_response/5
+    , chunked_response_t/5
+    , close_connection/5
+    , copy_body/5
+    , copy_body_100_continue/5
+    , empty_body/5
+    , head_response/5
+    , no_content_length/5
+    , no_content_length_1_0/5
+    , no_content_response/5
+    , not_modified_response/5
+    , pre_1_1_server/5
+    , pre_1_1_server_keep_alive/5
+    , respond_and_close/5
+    , respond_and_wait/5
+    , simple_response/5
+    , ssl_url/2
+    , start_app/0
+    , stop_app/1
+    , url/2
+  ]).
+
 -import(webserver, [start/2]).
 
 -include_lib("eunit/include/eunit.hrl").
@@ -100,9 +125,12 @@ test_no(N, Tests) ->
 
 start_app() ->
     application:start(crypto),
+    application:start(asn1),
     application:start(public_key),
     ok = application:start(ssl),
-    ok = lhttpc:start().
+    ok = lhttpc:start(),
+    timer:sleep(1000),
+    ok.
 
 stop_app(_) ->
     timer:sleep(1000),
@@ -334,7 +362,7 @@ simple_put() ->
 post() ->
     Port = start(gen_tcp, [fun copy_body/5]),
     URL = url(Port, "/post"),
-    {X, Y, Z} = now(),
+    {X, Y, Z} = os:timestamp(),
     Body = [
         "This is a rather simple post :)",
         integer_to_list(X),
@@ -350,7 +378,7 @@ post() ->
 post_100_continue() ->
     Port = start(gen_tcp, [fun copy_body_100_continue/5]),
     URL = url(Port, "/post_100_continue"),
-    {X, Y, Z} = now(),
+    {X, Y, Z} = os:timestamp(),
     Body = [
         "This is a rather simple post :)",
         integer_to_list(X),
@@ -647,6 +675,7 @@ partial_download_slow_chunks() ->
     ?assertEqual(<<?LONG_BODY_PART ?LONG_BODY_PART>>, Body).
 
 close_connection() ->
+    %receive _ -> ok after 0 -> ok end,
     Port = start(gen_tcp, [fun close_connection/5]),
     URL = url(Port, "/close"),
     ?assertEqual({error, connection_closed}, lhttpc:request(URL, "GET", [],
@@ -671,14 +700,14 @@ ssl_post() ->
 ssl_chunked() ->
     Port = start(ssl, [fun chunked_response/5, fun chunked_response_t/5]),
     URL = ssl_url(Port, "/ssl_chunked"),
-    FirstResult = lhttpc:request(URL, get, [], 100),
+    FirstResult = lhttpc:request(URL, get, [], 1000),
     ?assertMatch({ok, _}, FirstResult),
     {ok, FirstResponse} = FirstResult,
     ?assertEqual({200, "OK"}, status(FirstResponse)),
     ?assertEqual(<<?DEFAULT_STRING>>, body(FirstResponse)),
     ?assertEqual("chunked", lhttpc_lib:header_value("transfer-encoding",
             headers(FirstResponse))),
-    SecondResult = lhttpc:request(URL, get, [], 100),
+    SecondResult = lhttpc:request(URL, get, [], 1000),
     {ok, SecondResponse} = SecondResult,
     ?assertEqual({200, "OK"}, status(SecondResponse)),
     ?assertEqual(<<"Again, great success!">>, body(SecondResponse)),
