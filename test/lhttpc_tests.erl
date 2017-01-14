@@ -376,7 +376,9 @@ post() ->
     ?assertEqual(iolist_to_binary(Body), body(Response)).
 
 post_100_continue() ->
-    Port = start(gen_tcp, [fun copy_body_100_continue/5]),
+    Port = start(gen_tcp, [fun copy_body_100_continue/5,
+                           fun copy_body_100_continue/5,
+                           fun copy_body_100_continue/5]),
     URL = url(Port, "/post_100_continue"),
     {X, Y, Z} = os:timestamp(),
     Body = [
@@ -387,9 +389,30 @@ post_100_continue() ->
     ],
     {ok, Response} = lhttpc:request(URL, "POST", [], Body, 1000),
     {StatusCode, ReasonPhrase} = status(Response),
-    ?assertEqual(200, StatusCode),
-    ?assertEqual("OK", ReasonPhrase),
-    ?assertEqual(iolist_to_binary(Body), body(Response)).
+    ?assertEqual({200, "OK"}, {StatusCode, ReasonPhrase}),
+    ?assertEqual(iolist_to_binary(Body), body(Response)),
+
+    %% With options false
+    {ok, Response2} = lhttpc:request(URL, "POST", [], Body, 1000,
+                      [{is_content_length_defined, false},
+                       {is_host_defined, false}
+                      ]),
+    {StatusCode2, ReasonPhrase2} = status(Response2),
+    ?assertEqual({200, "OK"}, {StatusCode2, ReasonPhrase2}),
+    ?assertEqual(iolist_to_binary(Body), body(Response2)),
+
+
+    %% With options true
+    ContentLength = integer_to_list(iolist_size(Body)),
+    Hdrs = [{"Content-Length", ContentLength}, {"Host", "localhost"}],
+    {ok, Response3} = lhttpc:request(URL, "POST", Hdrs, Body, 1000,
+                      [{is_content_length_defined, true},
+                       {is_host_defined, true}
+                      ]),
+    {StatusCode3, ReasonPhrase3} = status(Response3),
+    ?assertEqual({200, "OK"}, {StatusCode3, ReasonPhrase3}),
+    ?assertEqual(iolist_to_binary(Body), body(Response3))
+    .
 
 bad_url() ->
     ?assertError(_, lhttpc:request(ost, "GET", [], 100)).

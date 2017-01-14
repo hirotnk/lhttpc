@@ -334,6 +334,11 @@ request(URL, Method, Hdrs, Body, Timeout, Options) ->
 %% lhttpc will never close the connection itself; it will only be
 %% closed by the other end or the TCP keepalive mechanism.
 %%
+%% `{is_content_length_defined, Bool}' and `{is_host_defined, Bool}'
+%% is used to skip lhttpc_lib:header_value/2,3.
+%% When boolean value is specified, there is no need to check if the
+%% value exists.
+%%
 %% @end
 -spec request(string(), 1..65535, true | false, string(), atom() | string(),
     headers(), iolist(), pos_integer(), [option()]) -> result().
@@ -632,6 +637,10 @@ verify_options([{connect_options, List} | Options], Errors)
         when is_list(List) ->
     verify_options(Options, Errors);
 verify_options([{stream_to, Pid} | Options], Errors) when is_pid(Pid) ->
+    verify_options(Options, Errors);
+verify_options([{is_content_length_defined, Bool} | Options], Errors) when is_boolean(Bool) ->
+    verify_options(Options, Errors);
+verify_options([{is_host_defined, Bool} | Options], Errors) when is_boolean(Bool) ->
     verify_options(Options, Errors);
 verify_options([Option | Options], Errors) ->
     verify_options(Options, [Option | Errors]);

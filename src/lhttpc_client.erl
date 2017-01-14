@@ -111,8 +111,11 @@ execute(ReqId, From, Host, Port, Ssl, Path, Method, Hdrs, Body, Options) ->
     NormalizedMethod = lhttpc_lib:normalize_method(Method),
     MaxConnections = proplists:get_value(max_connections, Options, 10),
     ConnectionTimeout = proplists:get_value(connection_timeout, Options, infinity),
+    IsContentLengthDefined = proplists:get_value(is_content_length_defined, Options, undefined),
+    IsHostDefined = proplists:get_value(is_host_defined, Options, undefined),
+
     {ChunkedUpload, Request} = lhttpc_lib:format_request(Path, NormalizedMethod,
-        Hdrs, Host, Port, Body, PartialUpload),
+        Hdrs, Host, Port, Body, PartialUpload, IsContentLengthDefined, IsHostDefined),
     Socket = case lhttpc_lb:checkout(Host, Port, Ssl, MaxConnections, ConnectionTimeout) of
         {ok, S}   -> S; % Re-using HTTP/1.1 connections
         retry_later -> throw(retry_later);
@@ -343,6 +346,7 @@ has_body(_, 304, _) ->
 has_body(_, _, _) ->
     true. % All other responses are assumed to have a body
 
+-spec body_type(Hdrs::list({string(), term()})) -> chunked | infinite | {fixed_length, integer()}.
 body_type(Hdrs) ->
     % Find out how to read the entity body from the request.
     % * If we have a Content-Length, just use that and read the complete
