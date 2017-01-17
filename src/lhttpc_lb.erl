@@ -17,7 +17,7 @@
                 ssl :: boolean(),
                 max_conn :: max_connections(),
                 timeout :: timeout(),
-                clients :: ets:tid(),
+                clients_in_progress :: list(pid()),
                 free=[] :: list()}).
 
 -export_types([host/0, port_number/0, socket/0, max_connections/0, connection_timeout/0]).
@@ -85,28 +85,32 @@ init({Host,Port,Ssl,MaxConn,ConnTimeout}) ->
                         ssl=Ssl,
                         max_conn=MaxConn,
                         timeout=ConnTimeout,
-                        clients=ets:new(clients, [set, private])}};
+                        clients_in_progress=[]}};
         false ->
             ignore
     end.
 
-handle_call({checkout,Pid}, _From, S = #state{free=[], max_conn=Max, clients=Tid}) ->
-    Size = ets:info(Tid, size),
-    case Max > Size of
+handle_call({checkout,Pid}, _From, S = #state{free=[], max_conn=Max, clients_in_progress=Clients}) ->
+    case Max > length(Clients) of
         true ->
             %% We don't have an open socket, but the client can open one.
-            add_client(Tid, Pid),
-            {reply, no_socket, S};
+            {reply, no_socket, S#state{clients_in_progress=[Pid|Clients]}};
         false ->
-            {reply, retry_later, S}
+            NewClients = filter_dead_clients(Clients),
+            case Max > length(NewClients) of
+                true ->
+                    %% We don't have an open socket, but the client can open one.
+                    {reply, no_socket, S#state{clients_in_progress=[Pid|NewClients]}};
+                false ->
+                    {reply, retry_later, S#state{clients_in_progress=NewClients}}
+            end
     end;
-handle_call({checkout,Pid}, _From, S = #state{free=[{Taken,Timer}|Free], clients=Tid, ssl=Ssl}) ->
+handle_call({checkout,Pid}, _From, S = #state{free=[{Taken,Timer}|Free], ssl=Ssl, clients_in_progress=Clients}) ->
     lhttpc_sock:setopts(Taken, [{active,false}], Ssl),
     case lhttpc_sock:controlling_process(Taken, Pid, Ssl) of
         ok ->
             cancel_timer(Timer, Taken),
-            add_client(Tid,Pid),
-            {reply, {ok, Taken}, S#state{free=Free}};
+            {reply, {ok, Taken}, S#state{free=Free, clients_in_progress=[Pid|Clients]}};
         {error, badarg} ->
             %% The caller died.
             lhttpc_sock:setopts(Taken, [{active, once}], Ssl),
@@ -115,39 +119,31 @@ handle_call({checkout,Pid}, _From, S = #state{free=[{Taken,Timer}|Free], clients
             cancel_timer(Timer, Taken),
             handle_call({checkout,Pid}, _From, S#state{free=Free})
     end;
-handle_call({connection_count}, _From, S = #state{free=Free, clients=Tid}) ->
-    {reply, {ets:info(Tid, size), length(Free)}, S};
+handle_call({connection_count}, _From, S = #state{free=Free, clients_in_progress=Clients}) ->
+    NewClients = filter_dead_clients(Clients),
+    {reply, {length(NewClients), length(Free)}, S#state{clients_in_progress=NewClients}};
 
 handle_call(_Msg, _From, S) ->
     {noreply, S}.
 
-handle_cast({checkin, Pid, Socket}, S = #state{ssl=Ssl, clients=Tid, free=Free, timeout=T}) ->
-    lhttpc_stats:record(end_request, Socket),
-    remove_client(Tid, Pid),
+handle_cast({checkin, Pid, Socket}, S = #state{ssl=Ssl, free=Free, timeout=T, clients_in_progress=Clients}) ->
     %% the client cast function took care of giving us ownership
+    lhttpc_stats:record(end_request, Socket),
     case lhttpc_sock:setopts(Socket, [{active, once}], Ssl) of
         ok ->
             Timer = start_timer(Socket,T),
-            {noreply, S#state{free=[{Socket,Timer}|Free]}};
+            {noreply, S#state{free=[{Socket,Timer}|Free], clients_in_progress=remove_client(Pid, Clients)}};
         {error, _E} -> % socket closed or failed
             noreply_maybe_shutdown(S)
     end;
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({'DOWN', _Ref, process, Pid, Reason}, S=#state{clients=Tid}) ->
-    %% Client died
-    case Reason of
-        normal      -> ok;
-        timeout     -> lhttpc_stats:record(close_connection_timeout, Pid);
-        OtherReason -> io:format(standard_error, "DOWN ~p\n", [ OtherReason ])
-    end,
-    remove_client(Tid,Pid),
-    noreply_maybe_shutdown(S);
 handle_info({tcp_closed, Socket}, State) ->
     noreply_maybe_shutdown(remove_socket(Socket,State));
 handle_info({ssl_closed, Socket}, State) ->
     noreply_maybe_shutdown(remove_socket(Socket,State));
+
 handle_info({timeout, Socket}, State) ->
     noreply_maybe_shutdown(remove_socket(Socket,State));
 handle_info({tcp_error, Socket, _}, State) ->
@@ -166,8 +162,7 @@ handle_info(_Info, State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-terminate(_Reason, #state{host=H, port=P, ssl=Ssl, free=Free, clients=Tid}) ->
-    ets:delete(Tid),
+terminate(_Reason, #state{host=H, port=P, ssl=Ssl, free=Free}) ->
     ets:delete(?MODULE,{H,P,Ssl}),
     lists:foreach(fun ({Socket, _TimerRef}) ->
                           lhttpc_stats:record(close_connection_local, Socket),
@@ -187,13 +182,16 @@ find_lb(Name = {Host,Port,Ssl}, Args={MaxConn, ConnTimeout}) ->
     case ets:lookup(?MODULE, Name) of
         [] ->
             case supervisor:start_child(lhttpc_lb_sup, [Host,Port,Ssl,MaxConn,ConnTimeout]) of
-                {ok, undefined} -> find_lb(Name,Args);
+                {ok, undefined} ->
+                    %% The lb has already started and Pid should be in the table now.
+                    find_lb(Name,Args);
                 {ok, Pid} -> Pid
             end;
         [{_Name, Pid}] ->
-            case is_process_alive(Pid) of % lb died, stale entry
+            case erlang:is_process_alive(Pid) of
                 true -> Pid;
                 false ->
+                    %% lb died, stale entry
                     ets:delete(?MODULE, Name),
                     find_lb(Name,Args)
             end
@@ -212,20 +210,6 @@ find_lb(Name={_Host,_Port,_Ssl}) ->
                     ets:delete(?MODULE,Name),
                     {error, undefined}
             end
-    end.
-
--spec add_client(ets:tid(), pid()) -> true.
-add_client(Tid, Pid) ->
-    Ref = erlang:monitor(process, Pid),
-    ets:insert(Tid, {Pid, Ref}).
-
--spec remove_client(ets:tid(), pid()) -> true.
-remove_client(Tid, Pid) ->
-    case ets:lookup(Tid, Pid) of
-        [] -> ok; % client already removed
-        [{_Pid, Ref}] ->
-            erlang:demonitor(Ref, [flush]),
-            ets:delete(Tid, Pid)
     end.
 
 -spec remove_socket(socket(), #state{}) -> #state{}.
@@ -258,10 +242,24 @@ start_timer(_, infinity) -> make_ref(); % dummy timer
 start_timer(Socket, Timeout) ->
     erlang:send_after(Timeout, self(), {timeout,Socket}).
 
-noreply_maybe_shutdown(S=#state{clients=Tid, free=Free}) ->
-    case Free =:= [] andalso ets:info(Tid, size) =:= 0 of
+noreply_maybe_shutdown(S0=#state{free=Free, clients_in_progress=Clients}) ->
+    NewClients = filter_dead_clients(Clients),
+    S1 = S0#state{clients_in_progress=NewClients},
+    case Free =:= [] andalso length(NewClients) =:= 0 of
         true -> % we're done for
-            {noreply,S,?SHUTDOWN_DELAY};
+            {noreply, S1, ?SHUTDOWN_DELAY};
         false ->
-            {noreply, S}
+            {noreply, S1}
     end.
+
+-spec filter_dead_clients(Clients::list(pid())) -> NewClients::list(pid()).
+filter_dead_clients(Clients) ->
+    lists:filter(fun erlang:is_process_alive/1, Clients).
+
+-spec remove_client(Pid::pid(), Clients::list(pid())) -> UpdatedClients::list(pid()).
+remove_client(Pid, [Pid|Clients]) -> Clients;
+remove_client(Pid0, [Pid1|Clients]) ->
+  [Pid1 | remove_client(Pid0, Clients)];
+remove_client(_Pid, []) -> [].
+
+

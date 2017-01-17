@@ -590,6 +590,7 @@ read_response(Pid, Timeout) ->
 kill_client(Pid) ->
     unlink(Pid), % or we'll kill ourself :O
     exit(Pid, timeout),
+    lhttpc_stats:record(close_connection_timeout, Pid),
     {error, timeout}.
 
 kill_client_after(Pid, Timeout) ->
@@ -599,6 +600,7 @@ kill_client_after(Pid, Timeout) ->
     after Timeout ->
         catch unlink(Pid), % or we'll kill ourself :O
         exit(Pid, timeout),
+        lhttpc_stats:record(close_connection_timeout, Pid),
         {error, timeout}
     end.
 
